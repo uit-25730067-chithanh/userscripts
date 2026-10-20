@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Hide & Sort Courses - Microsoft Teams (UIT CITD)
 // @namespace    Violentmonkey Scripts
-// @version      1.0
+// @version      1.1
 // @description  Lọc và sắp xếp môn học Microsoft Teams theo học kỳ HK1 - HK5 và ALL, theo thứ tự thời khóa biểu (Tối ưu cho Teams Web)
 // @author       Dang Chi Thanh
 // @match        https://teams.cloud.microsoft/*
@@ -283,6 +283,12 @@
             nameBtn.appendChild(titleBox);
         }
 
+        // Dọn dẹp badge cũ trong titleBox nếu có từ phiên bản thử nghiệm
+        const legacyTitleBadge = titleBox.querySelector('.citd-card-teacher-badge');
+        if (legacyTitleBadge) {
+            legacyTitleBadge.remove();
+        }
+
         if (titleBox.dataset.citdCode !== titleInfo.code) {
             titleBox.dataset.citdCode = titleInfo.code;
             while (titleBox.firstChild) {
@@ -309,7 +315,7 @@
         }
         titleBox.style.display = 'flex';
 
-        // 2. Định dạng Giảng viên: Thêm badge vào footer (tự dạt sang phải qua margin-left: auto)
+        // 2. Định dạng Giảng viên: Nằm ở Footer bên phải, tự động ẩn khi có nút 'Join now' đang họp
         if (titleInfo.teacher) {
             const footer = card.querySelector('.fui-CardFooter');
             if (footer) {
@@ -323,7 +329,12 @@
                     teacherBadge.textContent = titleInfo.teacher;
                     teacherBadge.title = `Giảng viên: ${titleInfo.teacher}`;
                 }
-                teacherBadge.style.display = 'inline-flex';
+
+                // Kiểm tra xem thẻ có nút Join now (cuộc họp trực tuyến đang diễn ra) hay không
+                const hasJoinBtn = card.querySelector('[data-testid="join-button"]') !== null ||
+                                   card.querySelector('.join-now-btn') !== null ||
+                                   card.getAttribute('aria-label')?.includes('Meeting live now');
+                teacherBadge.style.display = hasJoinBtn ? 'none' : 'inline-flex';
             }
         }
     }
@@ -546,6 +557,12 @@
                 border: 1px solid var(--colorNeutralStroke2, rgba(0, 0, 0, 0.06)) !important;
                 flex-shrink: 1 !important;
                 margin-left: auto !important;
+            }
+
+            /* Tự động ẩn badge Giảng viên khi thẻ có nút Join now (cuộc họp trực tuyến đang diễn ra) */
+            .fui-Card:has([data-testid="join-button"]) .citd-card-teacher-badge,
+            .fui-Card:has(.join-now-btn) .citd-card-teacher-badge {
+                display: none !important;
             }
 
             /* Avatar hiển thị mã môn trên 1 dòng duy nhất, giữ nguyên kích thước 72x72 và màu nền chuẩn của Teams */

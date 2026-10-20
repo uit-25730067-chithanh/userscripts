@@ -266,6 +266,60 @@ async function run() {
   }
   console.log('✅ Tên giảng viên nhiều chữ (ThS. Trần Thị Hoài Thương) hiển thị trọn vẹn, không bị cắt.');
 
+  // Kiểm tra vị trí hiển thị giảng viên: Nằm ở Footer bên phải; Tự động ẩn khi có nút Join now
+  const locationCheck = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll('[role="group"][data-tid$="-team-card"]'))
+      .filter(c => {
+        const item = c.closest('.fui-Flex');
+        return item && item.style.display !== 'none';
+      });
+
+    return cards.map(c => {
+      const titleBox = c.querySelector('.citd-card-title-box');
+      const footer = c.querySelector('.fui-CardFooter');
+      const teacherInTitleBox = titleBox ? titleBox.querySelector('.citd-card-teacher-badge') !== null : false;
+      const teacherEl = footer ? footer.querySelector('.citd-card-teacher-badge') : null;
+      const teacherVisible = teacherEl ? window.getComputedStyle(teacherEl).display !== 'none' : false;
+      const joinBtn = footer ? footer.querySelector('[data-testid="join-button"]') : null;
+      const joinBtnVisible = joinBtn ? window.getComputedStyle(joinBtn).display !== 'none' : false;
+      return {
+        code: c.querySelector('.citd-card-code-pill')?.textContent.trim(),
+        teacherInTitleBox,
+        hasTeacherInFooter: teacherEl !== null,
+        teacherVisible,
+        hasJoinBtn: joinBtn !== null,
+        joinBtnVisible
+      };
+    });
+  });
+
+  for (const item of locationCheck) {
+    if (item.teacherInTitleBox) {
+      throw new Error(`❌ Thẻ ${item.code} vẫn còn badge giảng viên trong Title Box! Yêu cầu Title Box chỉ chứa Mã môn & Tên môn.`);
+    }
+    if (!item.hasTeacherInFooter) {
+      throw new Error(`❌ Thẻ ${item.code} không tìm thấy badge giảng viên trong Footer!`);
+    }
+  }
+
+  // Thẻ SE104 có nút Join now: Badge giảng viên phải được tự động ẩn để nhường chỗ
+  const se104Card = locationCheck.find(item => item.code?.startsWith('SE104'));
+  if (!se104Card || !se104Card.joinBtnVisible) {
+    throw new Error('❌ Nút Join now của SE104 không hiển thị trong Footer!');
+  }
+  if (se104Card.teacherVisible) {
+    throw new Error('❌ Thẻ SE104 đang có nút Join now nhưng badge giảng viên vẫn hiển thị (chưa tự động ẩn)!');
+  }
+
+  // Các thẻ khác không có nút Join now: Badge giảng viên phải hiển thị bình thường ở Footer
+  const normalCards = locationCheck.filter(item => !item.code?.startsWith('SE104'));
+  for (const card of normalCards) {
+    if (!card.teacherVisible) {
+      throw new Error(`❌ Thẻ ${card.code} không có cuộc họp nhưng badge giảng viên lại bị ẩn!`);
+    }
+  }
+  console.log('✅ Title Box vuông vức, Footer cân đối: Thẻ thường hiển thị Giảng viên bên phải; Thẻ có lớp học tự động ẩn Giảng viên nhường chỗ 100% cho nút Join now!');
+
   console.log('\n--- TEST CASE 7: Kiểm tra ổn định khi chuyển tab & bật/tắt Other teams liên tục ---');
   // Thực hiện chuỗi click chuyển tab nhanh để kiểm tra độ ổn định
   const sequence = ['HK2', 'HK5', 'HK4', 'ALL', 'HK5', 'HK2', 'HK5'];
