@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Hide & Sort Courses - Microsoft Teams (UIT CITD)
-// @namespace    http://tampermonkey.net/
+// @namespace    Violentmonkey Scripts
 // @version      1.0
 // @description  Lọc và sắp xếp môn học Microsoft Teams theo học kỳ HK1 - HK5 và ALL, theo thứ tự thời khóa biểu (Tối ưu cho Teams Web)
 // @author       Dang Chi Thanh

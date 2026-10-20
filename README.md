@@ -1,16 +1,19 @@
-# tampermonkey-web-cleaner
+# userscripts
 
-A personal space for tinkering with browser userscripts and tweaking web interfaces across browsers (Edge, Chrome, Safari, Firefox).
-
-## Overview
-
-This repository contains lightweight custom userscripts designed to clean up distracting UI elements, filter content, and optimize everyday browsing workflows on various websites.
+Personal Tampermonkey userscripts for UIT academic portals (Microsoft Teams, CITD Elearning).
 
 ## Usage
 
-1. Install a userscript manager like Tampermonkey or Violentmonkey on your browser.
-2. Add the desired script from the `scripts/` directory.
-3. Configure settings directly within the script metadata or variables if needed.
+1. Install [Tampermonkey](https://www.tampermonkey.net/) in your browser.
+2. Install the desired script from `scripts/`:
+   - `teams-courses-filter.user.js`: Filter and organize courses on Microsoft Teams.
+   - `citd-courses-filter.user.js`: Filter courses by semester on CITD Elearning.
+
+## Testing
+
+```bash
+node tests/test-filter.cjs
+```
 
 ## License
 

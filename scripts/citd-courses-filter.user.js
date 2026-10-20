@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Hide & Sort Courses - CITD Elearning (Edge Optimized)
-// @namespace    http://tampermonkey.net/
+// @namespace    Violentmonkey Scripts
 // @version      2.5
 // @description  Lọc và sắp xếp môn học theo học kỳ HK1 - HK5 và All, quản lý ẩn/hiện Thông tin chung (Tối ưu cho Edge)
 // @author       Dang Chi Thanh
