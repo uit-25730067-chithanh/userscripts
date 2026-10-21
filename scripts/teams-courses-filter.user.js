@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Hide & Sort Courses - Microsoft Teams (UIT CITD)
 // @namespace    Violentmonkey Scripts
-// @version      1.1
+// @version      1.2
 // @description  Lọc và sắp xếp môn học Microsoft Teams theo học kỳ HK1 - HK5 và ALL, theo thứ tự thời khóa biểu (Tối ưu cho Teams Web)
 // @author       Dang Chi Thanh
 // @match        https://teams.cloud.microsoft/*
 // @match        https://teams.microsoft.com/*
-// @icon         https://statics.teams.cdn.office.net/evergreen-assets/icons/favicon.ico
+// @icon         https://teams.microsoft.com/favicon.ico
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -20,12 +20,12 @@
     // =========================================================================
     const SEMESTER_COURSES = {
         HK5: [
-            { code: 'CS311.G11.CN2.TTNT', alt: 'CS311' }, // [29] Kỹ thuật lập trình Trí tuệ nhân tạo (Chủ nhật)
-            { code: 'SS009.G11.CN1.CNTT', alt: 'SS009' }, // [28] Chủ nghĩa xã hội khoa học (Thứ 7)
-            { code: 'CS315.G12.LT.TTNT', alt: 'CS315' },  // [27] Máy học nâng cao (Thứ 6)
-            { code: 'SS008.G11.CN1.CNTT', alt: 'SS008' }, // [26] Kinh tế chính trị Mác – Lênin (Thứ 5)
-            { code: 'CE340.G12.LT.TTNT', alt: 'CE340' },  // [25] Trí tuệ nhân tạo cho hệ thống nhúng (Thứ 4)
-            { code: 'SE104.G11.CN2.TTNT', alt: 'SE104' }  // [24] Nhập môn công nghệ phần mềm (Thứ 3)
+            { code: 'CS311.G11.CN2.TTNT', alt: 'CS311', day: 0 }, // [29] Kỹ thuật lập trình Trí tuệ nhân tạo (Chủ nhật)
+            { code: 'SS009.G11.CN1.CNTT', alt: 'SS009', day: 6 }, // [28] Chủ nghĩa xã hội khoa học (Thứ 7)
+            { code: 'CS315.G12.LT.TTNT', alt: 'CS315', day: 5 },  // [27] Máy học nâng cao (Thứ 6)
+            { code: 'SS008.G11.CN1.CNTT', alt: 'SS008', day: 4 }, // [26] Kinh tế chính trị Mác – Lênin (Thứ 5)
+            { code: 'CE340.G12.LT.TTNT', alt: 'CE340', day: 3 },  // [25] Trí tuệ nhân tạo cho hệ thống nhúng (Thứ 4)
+            { code: 'SE104.G11.CN2.TTNT', alt: 'SE104', day: 2 }   // [24] Nhập môn công nghệ phần mềm (Thứ 3)
         ],
         HK4: [
             { code: 'CS112.F31.LT.TTNT', alt: 'CS112' },  // [23] Phân tích và thiết kế thuật toán (Thứ 7)
@@ -104,6 +104,16 @@
             }
         }
         return null;
+    }
+
+    function isTodayCourse(courseItem, targetDay) {
+        if (!courseItem || courseItem.day === undefined) return false;
+        const currentDay = typeof targetDay === 'number'
+            ? targetDay
+            : (typeof window !== 'undefined' && window.__citd_mock_day !== undefined
+                ? window.__citd_mock_day
+                : new Date().getDay());
+        return courseItem.day === currentDay;
     }
 
     // =========================================================================
@@ -340,6 +350,7 @@
     }
 
     function restoreCourseCard(card) {
+        card.classList.remove('citd-card-today');
         restoreCardAvatar(card);
 
         const nameBtn = card.querySelector('[data-testid="team-name"]');
@@ -557,6 +568,32 @@
                 border: 1px solid var(--colorNeutralStroke2, rgba(0, 0, 0, 0.06)) !important;
                 flex-shrink: 1 !important;
                 margin-left: auto !important;
+            }
+
+            /* Footer thẻ môn: Canh giữa các phần tử (nút công cụ và badge giảng viên) theo trục dọc */
+            .fui-CardFooter {
+                align-items: center !important;
+            }
+
+            /* Hiệu ứng viền làm nổi bật nhẹ nhàng môn học có lịch học hôm nay */
+            .fui-Card.citd-card-today {
+                border: 1.5px solid var(--colorBrandStroke1, #5b5fc7) !important;
+                box-shadow: 0 0 6px rgba(91, 95, 199, 0.22) !important;
+                position: relative !important;
+                transition: border-color 0.2s ease, box-shadow 0.2s ease !important;
+            }
+            .fui-Card.citd-card-today .citd-card-code-pill {
+                background: rgba(91, 95, 199, 0.12) !important;
+            }
+            .fui-Card.citd-card-today:hover {
+                border-color: #6e73f6 !important;
+                box-shadow: 0 0 10px rgba(110, 115, 246, 0.3) !important;
+            }
+            @media (prefers-color-scheme: dark) {
+                .fui-Card.citd-card-today {
+                    border-color: #7f85f5 !important;
+                    box-shadow: 0 0 8px rgba(127, 133, 245, 0.25) !important;
+                }
             }
 
             /* Tự động ẩn badge Giảng viên khi thẻ có nút Join now (cuộc họp trực tuyến đang diễn ra) */
@@ -875,6 +912,14 @@
                         formatCourseCard(card, titleText);
                         col.style.display = '';
                         col.style.order = String(courseInfo.index);
+
+                        // Highlight viền neon cho môn học có lịch học trong ngày hôm nay
+                        if (isTodayCourse(courseInfo.item)) {
+                            card.classList.add('citd-card-today');
+                        } else {
+                            card.classList.remove('citd-card-today');
+                        }
+
                         if (sectionId === 'ClassTeamsSection') {
                             visibleInClasses++;
                         } else if (sectionId === 'HiddenTeamsSection') {

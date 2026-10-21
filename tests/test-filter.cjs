@@ -181,6 +181,7 @@ async function run() {
     const customTitleBoxes = document.querySelectorAll('.citd-card-title-box').length;
     const customTeacherBadges = document.querySelectorAll('.citd-card-teacher-badge').length;
     const customAvatarCodes = document.querySelectorAll('.citd-avatar-subject-code').length;
+    const customTodayCards = document.querySelectorAll('.citd-card-today').length;
 
     // Kiểm tra thẻ span gốc của Teams
     const origSpans = Array.from(document.querySelectorAll('[data-testid="team-name"] .fui-StyledText'))
@@ -196,6 +197,7 @@ async function run() {
       customTitleBoxes,
       customTeacherBadges,
       customAvatarCodes,
+      customTodayCards,
       origSpansCount: origSpans.length,
       sampleOrigText: origSpans[0]
     };
@@ -211,8 +213,8 @@ async function run() {
   if (allState.imgDisplay === 'none') {
     throw new Error('❌ Thẻ img của avatar phải được khôi phục hiển thị ở tab ALL!');
   }
-  if (allState.customTitleBoxes !== 0 || allState.customTeacherBadges !== 0 || allState.customAvatarCodes !== 0) {
-    throw new Error(`❌ Tab ALL không được áp dụng style sửa label! Còn sót lại: titleBoxes=${allState.customTitleBoxes}, teacherBadges=${allState.customTeacherBadges}, avatarCodes=${allState.customAvatarCodes}`);
+  if (allState.customTitleBoxes !== 0 || allState.customTeacherBadges !== 0 || allState.customAvatarCodes !== 0 || allState.customTodayCards !== 0) {
+    throw new Error(`❌ Tab ALL không được áp dụng style sửa label hoặc viền neon! Còn sót lại: titleBoxes=${allState.customTitleBoxes}, teacherBadges=${allState.customTeacherBadges}, avatarCodes=${allState.customAvatarCodes}, todayCards=${allState.customTodayCards}`);
   }
   console.log('✅ Tab ALL khôi phục 100% về mặc định: 0 custom elements, cả 3 section hiển thị với tiêu đề gốc, avatar img hiển thị lại.');
 
@@ -282,13 +284,15 @@ async function run() {
       const teacherVisible = teacherEl ? window.getComputedStyle(teacherEl).display !== 'none' : false;
       const joinBtn = footer ? footer.querySelector('[data-testid="join-button"]') : null;
       const joinBtnVisible = joinBtn ? window.getComputedStyle(joinBtn).display !== 'none' : false;
+      const footerAlignItems = footer ? window.getComputedStyle(footer).alignItems : null;
       return {
         code: c.querySelector('.citd-card-code-pill')?.textContent.trim(),
         teacherInTitleBox,
         hasTeacherInFooter: teacherEl !== null,
         teacherVisible,
         hasJoinBtn: joinBtn !== null,
-        joinBtnVisible
+        joinBtnVisible,
+        footerAlignItems
       };
     });
   });
@@ -299,6 +303,9 @@ async function run() {
     }
     if (!item.hasTeacherInFooter) {
       throw new Error(`❌ Thẻ ${item.code} không tìm thấy badge giảng viên trong Footer!`);
+    }
+    if (item.footerAlignItems !== 'center') {
+      throw new Error(`❌ Thẻ ${item.code} có Footer không phải align-items: center (hiện tại: ${item.footerAlignItems})!`);
     }
   }
 
@@ -319,6 +326,37 @@ async function run() {
     }
   }
   console.log('✅ Title Box vuông vức, Footer cân đối: Thẻ thường hiển thị Giảng viên bên phải; Thẻ có lớp học tự động ẩn Giảng viên nhường chỗ 100% cho nút Join now!');
+
+  // Kiểm tra hiệu ứng viền Neon (citd-card-today) cho môn có lịch học trong ngày hôm nay
+  const neonCheck = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll('[role="group"][data-tid$="-team-card"]'))
+      .filter(c => {
+        const item = c.closest('.fui-Flex');
+        return item && item.style.display !== 'none';
+      });
+    return cards.map(c => {
+      const code = c.querySelector('.citd-card-code-pill')?.textContent.trim();
+      const isToday = c.classList.contains('citd-card-today');
+      const style = window.getComputedStyle(c);
+      return {
+        code,
+        isToday,
+        boxShadow: style.boxShadow,
+        borderColor: style.borderColor
+      };
+    });
+  });
+
+  const todayCard = neonCheck.find(c => c.isToday);
+  if (!todayCard) {
+    throw new Error('❌ Không tìm thấy thẻ môn học nào có viền neon (citd-card-today) cho ngày hôm nay!');
+  }
+  if (!todayCard.boxShadow || todayCard.boxShadow === 'none') {
+    throw new Error(`❌ Thẻ ${todayCard.code} không có hiệu ứng phát sáng neon (box-shadow: ${todayCard.boxShadow})!`);
+  }
+  console.log(`✅ Đã kích hoạt viền Neon nổi bật cho môn có lịch hôm nay: ${todayCard.code} (boxShadow: ${todayCard.boxShadow.slice(0, 45)}...)`);
+  await page.screenshot({ path: path.join(__dirname, '../tmp/screenshot_neon_today.png') });
+  console.log('📸 Đã lưu screenshot viền Neon: tmp/screenshot_neon_today.png');
 
   console.log('\n--- TEST CASE 7: Kiểm tra ổn định khi chuyển tab & bật/tắt Other teams liên tục ---');
   // Thực hiện chuỗi click chuyển tab nhanh để kiểm tra độ ổn định
