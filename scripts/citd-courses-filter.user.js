@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Hide & Sort Courses - CITD Elearning (Edge Optimized)
 // @namespace    Violentmonkey Scripts
-// @version      2.5
+// @version      2.8
 // @description  Lọc và sắp xếp môn học theo học kỳ HK1 - HK5 và All, quản lý ẩn/hiện Thông tin chung (Tối ưu cho Edge)
 // @author       Dang Chi Thanh
 // @match        https://elearning.citd.edu.vn/*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=edu.vn
+// @icon         https://elearning.citd.edu.vn/pluginfile.php/1/core_admin/favicon/64x64/1792598887/favicon.png
 // @grant        none
 // ==/UserScript==
 
@@ -113,9 +113,21 @@
         const style = document.createElement('style');
         style.id = 'citd-custom-styles';
         style.textContent = `
+            /* Tối ưu padding đều cho khung nội dung chính */
+            #topofscroll,
+            #topofscroll.main-inner {
+                padding: 0.5rem !important;
+            }
+
             /* Bảng Tips bên trong khối Thông tin chung */
             .activity-grid.noname-grid:has(a[href*="cong-cu-hoc-tap"]),
             .activity-grid.noname-grid:has(caption:contains("Tips")) {
+                display: none !important;
+            }
+
+            /* Loại bỏ thẻ <br> lạc quẻ ngay liền sau khung tìm kiếm */
+            .box.py-3 + br,
+            .box:has(> .simplesearchform) + br {
                 display: none !important;
             }
 
