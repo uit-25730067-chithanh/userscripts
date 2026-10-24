@@ -14,8 +14,9 @@ async function run() {
 
   await page.goto(`file://${mockHtmlPath}`);
 
-  // Inject userscript
+  // Inject userscript with deterministic weekday mock (Thursday = 4, matches SS008)
   await page.evaluate((code) => {
+    window.__citd_mock_day = 4;
     const script = document.createElement('script');
     script.textContent = code;
     document.body.appendChild(script);

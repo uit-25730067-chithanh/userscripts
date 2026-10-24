@@ -8,6 +8,7 @@ Personal userscripts for UIT academic portals (Microsoft Teams, CITD Elearning).
 2. Install the desired script from `scripts/`:
    - `teams-courses-filter.user.js`: Filter and organize courses on Microsoft Teams.
    - `citd-courses-filter.user.js`: Filter courses by semester on CITD Elearning.
+   - `teams-lecture-comments-harvester.user.js`: Export lecture comments and reaction details from Microsoft Teams to CSV.
 
 ## Testing
 
