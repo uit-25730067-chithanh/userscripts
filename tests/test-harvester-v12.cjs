@@ -149,7 +149,7 @@ async function runTest() {
     };
   });
   console.log('✅ [6] Exposed API checks:', apiCheck);
-  if (apiCheck.version !== '1.3.1') throw new Error(`Expected version 1.3.1, got ${apiCheck.version}`);
+  if (apiCheck.version !== '1.3.2') throw new Error(`Expected version 1.3.2, got ${apiCheck.version}`);
   if (!apiCheck.hasExtractIdb) throw new Error('extractFromIndexedDB must be exposed');
 
   // 7. Verify dynamic progress counter formatting: (count/total)

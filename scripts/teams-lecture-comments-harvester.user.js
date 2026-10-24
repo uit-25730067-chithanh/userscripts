@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Teams Lecture Comments Harvester
 // @namespace    https://github.com/uit-25730067-chithanh
-// @version      1.3.1
+// @version      1.3.2
 // @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Dynamic Progress Counter, Hybrid IndexedDB + DOM, Exports 9-column CSV)
 // @author       uit-25730067-chithanh
 // @match        https://teams.cloud.microsoft/*
@@ -225,84 +225,12 @@
     return null;
   }
 
-  // --- 6. Safe Virtual Hover (Zero-Click) ---
-  async function inspectViaHover(btn) {
-    try {
-      btn.scrollIntoView({ behavior: 'auto', block: 'nearest' });
-      const rect = btn.getBoundingClientRect();
-      const x = rect.left + rect.width / 2;
-      const y = rect.top + rect.height / 2;
-
-      const eventInit = {
-        bubbles: true,
-        cancelable: true,
-        view: window,
-        clientX: x,
-        clientY: y,
-        screenX: x,
-        screenY: y,
-        pointerId: 1,
-        pointerType: 'mouse',
-        isPrimary: true,
-        relatedTarget: btn.parentElement
-      };
-
-      const targets = [btn, btn.querySelector('img, span, div')].filter(Boolean);
-      targets.forEach(t => {
-        t.dispatchEvent(new PointerEvent('pointerover', eventInit));
-        t.dispatchEvent(new MouseEvent('mouseover', eventInit));
-        t.dispatchEvent(new PointerEvent('pointerenter', eventInit));
-        t.dispatchEvent(new MouseEvent('mouseenter', eventInit));
-      });
-
-      let menu = null;
-      const menuSelectors = [
-        '[role="menu"]',
-        '.fui-MenuPopover',
-        '[role="dialog"]',
-        '[data-tid*="reaction-flyout"]',
-        '[data-tid*="popover"]'
-      ];
-
-      for (let i = 0; i < 9; i++) {
-        await new Promise(r => setTimeout(r, 40));
-        menu = document.querySelector(menuSelectors.join(', '));
-        if (menu && menu.innerText.trim()) break;
-      }
-
-      let detail = null;
-      if (menu) {
-        const rawText = menu.innerText.trim();
-        const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-        if (lines.length > 0) {
-          const firstLine = lines[0];
-          const emoji = normalizeEmoji(firstLine) || normalizeEmoji(btn.getAttribute('aria-label') || '') || '❤️';
-          const names = lines.slice(1).filter(l =>
-            !normalizeEmoji(l) &&
-            !l.toLowerCase().includes('reaction') &&
-            !l.toLowerCase().includes('phản ứng')
-          );
-          if (names.length > 0) {
-            detail = `${emoji}: ${names.join(', ')}`;
-          } else {
-            detail = `${emoji}: ${lines.join(', ')}`;
-          }
-        }
-      }
-
-      targets.forEach(t => {
-        t.dispatchEvent(new PointerEvent('pointerout', eventInit));
-        t.dispatchEvent(new MouseEvent('mouseout', eventInit));
-        t.dispatchEvent(new PointerEvent('pointerleave', eventInit));
-        t.dispatchEvent(new MouseEvent('mouseleave', eventInit));
-      });
-
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-
-      return detail;
-    } catch (e) {
-      return null;
-    }
+  // --- 6. Safe Reaction Extraction (100% Non-Intrusive, No Synthetic Events) ---
+  // Authoritative reaction details are sourced directly from Teams IndexedDB (properties.emotions),
+  // with synchronous React Fiber/DOM props inspection fallback.
+  // Synthetic mouseover/pointerover & Escape key dispatching are permanently retired to guarantee zero unhandled rejections.
+  function inspectViaHover() {
+    return null;
   }
 
   // --- 7. Basic Reactions (Emoji + Count) ---
@@ -897,10 +825,13 @@
 
       for (const rec of records) {
         let overlap = 0;
-        if (domMids.has(rec.replyChainId)) overlap += 10;
+        if (domMids.has(rec.replyChainId)) overlap += 20;
         const mkeys = Object.keys(rec.messageMap || {});
         for (const k of mkeys) {
-          if (domMids.has(k)) overlap++;
+          const msg = rec.messageMap[k];
+          if (domMids.has(k) || (msg && msg.id && domMids.has(msg.id))) {
+            overlap++;
+          }
         }
         if (overlap > maxOverlap) {
           maxOverlap = overlap;
@@ -1131,7 +1062,6 @@
       let detail = networkReactionMap.get(String(mid));
       if (!detail) detail = extractDetailsFromReact(b, b.closest('[data-mid]'));
       if (!detail) detail = extractFromAria(b);
-      if (!detail) detail = await inspectViaHover(b);
 
       if (detail && commentMap.has(mid)) {
         const existing = commentMap.get(mid);
@@ -1150,18 +1080,15 @@
     // Auto-scroll upwards in channel replies viewport or messages list
     const vp = document.querySelector('[data-tid="channel-replies-viewport"]');
     const runway = document.querySelector('[data-tid="channel-replies-runway"]');
-    const scrollContainer = vp || runway;
+    const chatList = document.querySelector('[role="log"], [role="feed"], [data-tid*="chat-list"], [data-tid*="message-list"], .fui-Chat, .ui-chat');
+    const scrollContainer = vp || runway || chatList;
 
     if (scrollContainer) {
-      scrollContainer.scrollBy({ top: -750, behavior: 'auto' });
-    }
-
-    const items = document.querySelectorAll('[data-tid="channel-replies-pane-message"], [data-tid="chat-pane-message"], [data-mid]');
-    if (items.length > 0) {
-      items[0].scrollIntoView({ behavior: 'auto', block: 'start' });
-      const scrollParent = items[0].closest('[role="log"], [role="feed"], [data-tid*="chat-list"], [data-tid*="message-list"], .fui-Chat, .ui-chat') || items[0].parentElement;
-      if (scrollParent && scrollParent !== scrollContainer) {
-        scrollParent.scrollBy({ top: -750, behavior: 'auto' });
+      scrollContainer.scrollBy({ top: -800, behavior: 'auto' });
+    } else {
+      const items = document.querySelectorAll('[data-tid="channel-replies-pane-message"], [data-tid="chat-pane-message"], [data-mid]');
+      if (items.length > 0) {
+        items[0].scrollIntoView({ behavior: 'auto', block: 'start' });
       }
     }
 
@@ -1175,20 +1102,23 @@
       lastScrollHeight = currentScrollHeight;
     }
 
-    // Top detection
-    const isAtTop = scrollContainer && scrollContainer.scrollTop <= 2;
+    // Top detection (allow margin of 25px for sub-pixel and header offsets)
+    const isAtTop = scrollContainer ? scrollContainer.scrollTop <= 25 : false;
     const hasPostTitle = !!document.querySelector('[data-tid="postTitle-text"]');
 
     // Auto-stop criteria:
-    // 1. Reached top and height + comment count remained unchanged for at least 12 ticks (~5.4s)
-    // 2. OR postTitle is visible AND scrollTop <= 2 AND unchanged for 6 ticks (~2.7s)
-    // 3. OR all expected messages harvested (cachedIdbCount > 0 && currentHarvested >= cachedIdbCount && isAtTop && consecutiveStaleTicks >= 3)
-    const reachedAbsoluteTop = (isAtTop && consecutiveStaleTicks >= 12) ||
-                               (hasPostTitle && isAtTop && consecutiveStaleTicks >= 6) ||
-                               (cachedIdbCount > 0 && currentHarvested >= cachedIdbCount && isAtTop && consecutiveStaleTicks >= 3);
+    // 1. Reached top (scrollTop <= 25) and unchanged for 8 ticks (~3.6s)
+    // 2. OR postTitle is visible AND scrollTop <= 25 AND unchanged for 5 ticks (~2.2s)
+    // 3. OR IndexedDB has full dataset (cachedIdbCount > 0) and stale for 7 ticks (~3.1s)
+    // 4. OR absolutely stale for 12 ticks (~5.4s) anywhere (failsafe against infinite loop)
+    const shouldStop = 
+      (isAtTop && consecutiveStaleTicks >= 8) ||
+      (hasPostTitle && isAtTop && consecutiveStaleTicks >= 5) ||
+      (cachedIdbCount > 0 && consecutiveStaleTicks >= 7) ||
+      (consecutiveStaleTicks >= 12);
 
-    if (reachedAbsoluteTop && currentHarvested > 0) {
-      console.log('🏁 [Teams Harvester] Reached top of conversation history. Auto-exporting CSV...');
+    if (shouldStop && (currentHarvested > 0 || cachedIdbCount > 0)) {
+      console.log(`🏁 [Teams Harvester] Completed harvesting (staleTicks=${consecutiveStaleTicks}, harvested=${currentHarvested}, idbTotal=${cachedIdbCount}). Exporting CSV...`);
       stopAndExport();
     }
   }
@@ -1236,7 +1166,7 @@
 
   // --- 17. Expose Global Instance for Zero-Reload Hot-Swap ---
   window.__teamsCommentsHarvester = {
-    version: '1.3.1',
+    version: '1.3.2',
     destroy: () => {
       isHarvesting = false;
       if (harvestInterval) {
@@ -1263,5 +1193,5 @@
   extractFromIndexedDB().then(res => {
     if (res && res.success && res.count) cachedIdbCount = res.count;
   }).catch(() => {});
-  console.log('%c🛡️ Teams Lecture Comments Harvester v1.3.1 ready (Dynamic Progress Counter, Fluent Draggable UI).', 'color: #5b5fc7; font-weight: bold;');
+  console.log('%c🛡️ Teams Lecture Comments Harvester v1.3.2 ready (Non-Intrusive, Dynamic Progress Counter).', 'color: #5b5fc7; font-weight: bold;');
 })();
