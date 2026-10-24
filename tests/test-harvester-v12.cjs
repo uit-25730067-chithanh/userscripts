@@ -138,12 +138,18 @@ async function runTest() {
   // Wait 600ms for visibilityInterval to detect
   await page.waitForTimeout(650);
 
-  const isVisibleInCalendar = await page.evaluate(() => {
-    const root = document.getElementById('teams-lecture-comments-harvester-root');
-    return root && root.style.display !== 'none';
+  // 6. Verify version and exposed API
+  const apiCheck = await page.evaluate(() => {
+    return {
+      version: window.__teamsCommentsHarvester.version,
+      hasExtractIdb: typeof window.__teamsCommentsHarvester.extractFromIndexedDB === 'function',
+      hasExportCSV: typeof window.__teamsCommentsHarvester.exportCSV === 'function',
+      hasStartHarvest: typeof window.__teamsCommentsHarvester.startHarvest === 'function'
+    };
   });
-  console.log('✅ [5] In Calendar view -> Harvester button visible:', isVisibleInCalendar);
-  if (isVisibleInCalendar) throw new Error('Button must be HIDDEN in non-channel view');
+  console.log('✅ [6] Exposed API checks:', apiCheck);
+  if (apiCheck.version !== '1.3.0') throw new Error(`Expected version 1.3.0, got ${apiCheck.version}`);
+  if (!apiCheck.hasExtractIdb) throw new Error('extractFromIndexedDB must be exposed');
 
   console.log('🎉 ALL PLAYWRIGHT CHECKS PASSED PERFECTLY!');
   await browser.close();

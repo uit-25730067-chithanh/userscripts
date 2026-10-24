@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Teams Lecture Comments Harvester
 // @namespace    https://github.com/uit-25730067-chithanh
-// @version      1.2.0
-// @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Exports 9-column CSV)
+// @version      1.3.0
+// @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Hybrid IndexedDB + DOM, Exports 9-column CSV)
 // @author       uit-25730067-chithanh
 // @match        https://teams.cloud.microsoft/*
 // @match        https://teams.microsoft.com/*
@@ -16,14 +16,15 @@
  * ==============================================================================
  * SPECIFICATION & SAFETY GUARANTEES:
  * 1. COMPACT CORNER BUTTON: Neat, single MS Teams Fluent UI button in the corner.
- * 2. TRUSTED-TYPES / CSP IMMUNE: 100% pure DOM node construction (Zero innerHTML).
- * 3. ZERO-MUTATION & READ-ONLY: Never invokes .click() on reaction elements.
- * 4. REACT FIBER & PROPS SNIFFER: Extracts reactor names directly from RAM.
- * 5. PASSIVE FETCH INTERCEPTOR: Hooks window.fetch to capture reaction payloads.
- * 6. SAFE VIRTUAL HOVER: Uses pointerenter/mouseover to trigger tooltips without sending requests.
- * 7. ACCURATE QUOTE SEPARATION: Isolates replies, original authors, times, and contents.
- * 8. ZERO-RELOAD HOT-SWAP: Injects cleanly into live Teams calls without page reload.
- * 9. 9-COLUMN UTF-8 BOM CSV: Auto-detects lecture name and downloads <session>_comments.csv.
+ * 2. HYBRID INDEXEDDB + DOM HARVESTER: Extracts full reply chains & authoritative emotions from IndexedDB with DOM fallback.
+ * 3. TRUSTED-TYPES / CSP IMMUNE: 100% pure DOM node construction & DOMParser (Zero innerHTML).
+ * 4. ZERO-MUTATION & READ-ONLY: Never invokes .click() on reaction elements.
+ * 5. REACT FIBER & PROPS SNIFFER: Extracts reactor names directly from RAM.
+ * 6. PASSIVE FETCH INTERCEPTOR: Hooks window.fetch to capture reaction payloads.
+ * 7. SAFE VIRTUAL HOVER: Uses pointerenter/mouseover to trigger tooltips without sending requests.
+ * 8. ACCURATE QUOTE SEPARATION: Isolates replies, original authors, times, and contents.
+ * 9. ZERO-RELOAD HOT-SWAP: Injects cleanly into live Teams calls without page reload.
+ * 10. 9-COLUMN UTF-8 BOM CSV: Auto-detects lecture name and downloads <session>_comments.csv.
  * ==============================================================================
  */
 
@@ -52,6 +53,9 @@
   let harvestInterval = null;
   let consecutiveStaleTicks = 0;
   let lastCommentCount = 0;
+  let lastScrollHeight = 0;
+  let tickCounter = 0;
+  let cachedIdbCount = 0;
 
   // --- 1. Passive Network Interceptor (100% Read-Only) ---
   if (!window.__tlch_fetch_hooked) {
@@ -853,10 +857,183 @@
     }
   }, 500);
 
-  // --- 14. CSV Exporter ---
-  function exportCSV() {
-    scanCurrentDOM();
-    const results = Array.from(commentMap.values()).sort((a, b) => (a.mid || 0) - (b.mid || 0));
+  // --- 14. Extract From Teams IndexedDB (Primary Source for Full Reply Chains & Reactions) ---
+  async function extractFromIndexedDB() {
+    try {
+      if (typeof indexedDB === 'undefined' || !indexedDB.databases) return null;
+      const dbs = await indexedDB.databases();
+      const dbInfo = dbs.find(d => d.name && d.name.startsWith('Teams:replychain-manager:'));
+      if (!dbInfo) return null;
+
+      const db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open(dbInfo.name);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+
+      const records = await new Promise((resolve, reject) => {
+        const tx = db.transaction('replychains-2', 'readonly');
+        const store = tx.objectStore('replychains-2');
+        const getAllReq = store.getAll();
+        getAllReq.onsuccess = () => resolve(getAllReq.result || []);
+        getAllReq.onerror = () => reject(getAllReq.error);
+      });
+      db.close();
+
+      if (!records || records.length === 0) return null;
+
+      // Find dom mids to identify active reply chain
+      const domMids = new Set(Array.from(document.querySelectorAll('[data-mid]')).map(el => el.getAttribute('data-mid')).filter(Boolean));
+
+      let targetRecord = null;
+      let maxOverlap = 0;
+
+      for (const rec of records) {
+        let overlap = 0;
+        if (domMids.has(rec.replyChainId)) overlap += 10;
+        const mkeys = Object.keys(rec.messageMap || {});
+        for (const k of mkeys) {
+          if (domMids.has(k)) overlap++;
+        }
+        if (overlap > maxOverlap) {
+          maxOverlap = overlap;
+          targetRecord = rec;
+        }
+      }
+
+      if (!targetRecord && records.length > 0) {
+        // Fallback: pick record with largest messageMap
+        targetRecord = records.slice().sort((a, b) => Object.keys(b.messageMap || {}).length - Object.keys(a.messageMap || {}).length)[0];
+      }
+
+      if (!targetRecord || !targetRecord.messageMap) return null;
+
+      const msgMap = targetRecord.messageMap;
+      const msgKeys = Object.keys(msgMap);
+      if (msgKeys.length === 0) return null;
+
+      // Map MRI -> Display Name
+      const mriToName = new Map();
+      for (const k of msgKeys) {
+        const m = msgMap[k];
+        if (m.creator && m.imDisplayName) mriToName.set(m.creator, m.imDisplayName);
+      }
+
+      // Sort chronologically
+      msgKeys.sort((a, b) => {
+        const timeA = msgMap[a].originalArrivalTime || msgMap[a].clientArrivalTime || msgMap[a].composeTime || 0;
+        const timeB = msgMap[b].originalArrivalTime || msgMap[b].clientArrivalTime || msgMap[b].composeTime || 0;
+        return Number(timeA) - Number(timeB);
+      });
+
+      const parser = new DOMParser();
+      const rows = [];
+
+      for (const k of msgKeys) {
+        const m = msgMap[k];
+        if (!m.content) continue;
+        if (m.messageType === 'Control/Status' || m.messageType === 'Event/Call') continue;
+        if (m.content.includes('<callEventType>')) continue;
+
+        const timestamp = m.originalArrivalTime || m.clientArrivalTime || m.composeTime;
+        const timeStr = timestamp ? new Date(Number(timestamp)).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '';
+
+        let actualContent = '';
+        let isReply = 'Không';
+        let replyAuthor = '';
+        let replyTime = '';
+        let replyContent = '';
+
+        try {
+          const doc = parser.parseFromString(m.content, 'text/html');
+          const quoteEl = doc.querySelector('blockquote, [itemtype*="http://schema.skype.com/Reply"], [class*="quote"]');
+          if (quoteEl) {
+            isReply = 'Có';
+            const qAuthor = quoteEl.querySelector('b, strong, .author');
+            if (qAuthor) replyAuthor = (qAuthor.innerText || qAuthor.textContent || '').trim();
+            const qTime = quoteEl.querySelector('time, .time');
+            if (qTime) replyTime = (qTime.innerText || qTime.textContent || '').trim();
+            replyContent = (quoteEl.textContent || '').replace(replyAuthor, '').replace(replyTime, '').trim();
+            quoteEl.remove();
+          }
+          actualContent = (doc.body.textContent || '').trim();
+        } catch (e) {
+          actualContent = m.content.replace(/<[^>]+>/g, '').trim();
+        }
+
+        if (!actualContent && m.content.includes('<img')) {
+          actualContent = '[Ảnh/GIF]';
+        }
+
+        let reactionsStr = '';
+        let reactionDetails = '';
+        if (m.properties && Array.isArray(m.properties.emotions) && m.properties.emotions.length > 0) {
+          const rxCounts = [];
+          const rxDets = [];
+          m.properties.emotions.forEach(emo => {
+            const count = emo.users ? emo.users.length : 0;
+            let emoji = emo.key;
+            if (emoji === 'laugh') emoji = '😆';
+            else if (emoji === 'like') emoji = '👍';
+            else if (emoji === 'heart') emoji = '❤️';
+            else if (emoji === 'surprised') emoji = '😮';
+            else if (emoji === 'sad') emoji = '😢';
+            else if (emoji === 'angry') emoji = '😡';
+
+            rxCounts.push(`${emoji} (${count})`);
+            const userNames = (emo.users || []).map(u => mriToName.get(u.mri) || u.mri);
+            rxDets.push(`${emoji}: ${userNames.join(', ')}`);
+          });
+          reactionsStr = rxCounts.join(', ');
+          reactionDetails = rxDets.join(' | ');
+        }
+
+        if (actualContent || isReply === 'Có' || reactionsStr) {
+          rows.push({
+            mid: k,
+            time: timeStr,
+            author: m.imDisplayName || mriToName.get(m.creator) || 'Ẩn danh',
+            isReply: isReply,
+            replyAuthor: replyAuthor,
+            replyTime: replyTime,
+            replyContent: replyContent,
+            content: actualContent,
+            reactions: reactionsStr,
+            reactionDetails: reactionDetails
+          });
+        }
+      }
+      return { success: true, count: rows.length, rows: rows };
+    } catch (err) {
+      console.warn('[Teams Harvester] IndexedDB read error:', err);
+      return null;
+    }
+  }
+
+  // --- 15. CSV Exporter (Hybrid IndexedDB + DOM Fallback) ---
+  async function exportCSV() {
+    renderButton('harvesting', Math.max(commentMap.size, cachedIdbCount));
+
+    let results = [];
+
+    // 1. Primary: Extract from IndexedDB (preserves full reply chain + authoritative reaction details)
+    try {
+      const idbData = await extractFromIndexedDB();
+      if (idbData && idbData.success && idbData.rows && idbData.rows.length >= commentMap.size) {
+        results = idbData.rows;
+        console.log(`✅ [Teams Harvester] Primary source: Extracted ${results.length} comments from IndexedDB with full reactions.`);
+      }
+    } catch (idbErr) {
+      console.warn('[Teams Harvester] IndexedDB extraction failed or unavailable, falling back to DOM:', idbErr);
+    }
+
+    // 2. Fallback: Extract from DOM commentMap
+    if (results.length === 0) {
+      scanCurrentDOM();
+      results = Array.from(commentMap.values()).sort((a, b) => (a.mid || 0) - (b.mid || 0));
+      console.log(`ℹ️ [Teams Harvester] Secondary source: Extracted ${results.length} comments from DOM.`);
+    }
+
     if (results.length === 0) {
       alert('Chưa thu thập được comment nào! Vui lòng mở cuộc trò chuyện (Chat) trong Teams và thử lại.');
       renderButton('idle');
@@ -911,11 +1088,24 @@
     console.log(`📥 [Teams Harvester] Exported ${results.length} comments to ${downloadFileName}`);
   }
 
-  // --- 15. Harvesting Cycle (Zero-Click Auto-Scroll) ---
+  // --- 16. Harvesting Cycle (Zero-Click Auto-Scroll) ---
   async function stepHarvest() {
     if (!isHarvesting) return;
 
     scanCurrentDOM();
+    tickCounter++;
+
+    // Periodically update IndexedDB message count in background to show live accurate counter
+    if (tickCounter % 4 === 0) {
+      extractFromIndexedDB().then(res => {
+        if (res && res.success && res.count) {
+          cachedIdbCount = res.count;
+          if (isHarvesting) {
+            renderButton('harvesting', Math.max(commentMap.size, cachedIdbCount));
+          }
+        }
+      }).catch(() => {});
+    }
 
     // Inspect reactions safely without click
     const pillButtons = Array.from(document.querySelectorAll(
@@ -947,35 +1137,47 @@
       }
     }
 
-    const currentCount = commentMap.size;
+    const currentCount = Math.max(commentMap.size, cachedIdbCount);
     renderButton('harvesting', currentCount);
 
-    // Check if new comments were loaded
-    if (currentCount === lastCommentCount) {
-      consecutiveStaleTicks++;
-    } else {
-      consecutiveStaleTicks = 0;
-      lastCommentCount = currentCount;
-    }
-
     // Auto-scroll upwards in channel replies viewport or messages list
-    const runway = document.querySelector('[data-tid="channel-replies-viewport"], [data-tid="channel-replies-runway"]');
-    if (runway) {
-      runway.scrollBy({ top: -650, behavior: 'auto' });
+    const vp = document.querySelector('[data-tid="channel-replies-viewport"]');
+    const runway = document.querySelector('[data-tid="channel-replies-runway"]');
+    const scrollContainer = vp || runway;
+
+    if (scrollContainer) {
+      scrollContainer.scrollBy({ top: -750, behavior: 'auto' });
     }
 
     const items = document.querySelectorAll('[data-tid="channel-replies-pane-message"], [data-tid="chat-pane-message"], [data-mid]');
     if (items.length > 0) {
       items[0].scrollIntoView({ behavior: 'auto', block: 'start' });
       const scrollParent = items[0].closest('[role="log"], [role="feed"], [data-tid*="chat-list"], [data-tid*="message-list"], .fui-Chat, .ui-chat') || items[0].parentElement;
-      if (scrollParent && scrollParent !== runway) {
-        scrollParent.scrollBy({ top: -650, behavior: 'auto' });
+      if (scrollParent && scrollParent !== scrollContainer) {
+        scrollParent.scrollBy({ top: -750, behavior: 'auto' });
       }
     }
 
-    // Auto-stop if reached top
-    const isAtTop = runway && runway.scrollTop === 0;
-    if ((isAtTop || consecutiveStaleTicks >= 4) && currentCount > 0) {
+    // Check if new comments were loaded or scrollHeight changed
+    const currentScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
+    if (currentCount === lastCommentCount && currentScrollHeight === lastScrollHeight) {
+      consecutiveStaleTicks++;
+    } else {
+      consecutiveStaleTicks = 0;
+      lastCommentCount = currentCount;
+      lastScrollHeight = currentScrollHeight;
+    }
+
+    // Top detection
+    const isAtTop = scrollContainer && scrollContainer.scrollTop <= 2;
+    const hasPostTitle = !!document.querySelector('[data-tid="postTitle-text"]');
+
+    // Auto-stop criteria:
+    // 1. Reached top and height + comment count remained unchanged for at least 12 ticks (~5.4s)
+    // 2. OR postTitle is visible AND scrollTop <= 2 AND unchanged for 6 ticks (~2.7s)
+    const reachedAbsoluteTop = (isAtTop && consecutiveStaleTicks >= 12) || (hasPostTitle && isAtTop && consecutiveStaleTicks >= 6);
+
+    if (reachedAbsoluteTop && currentCount > 0) {
       console.log('🏁 [Teams Harvester] Reached top of conversation history. Auto-exporting CSV...');
       stopAndExport();
     }
@@ -984,8 +1186,20 @@
   function startHarvest() {
     isHarvesting = true;
     consecutiveStaleTicks = 0;
-    lastCommentCount = commentMap.size;
-    renderButton('harvesting', commentMap.size);
+    lastCommentCount = Math.max(commentMap.size, cachedIdbCount);
+    lastScrollHeight = 0;
+    tickCounter = 0;
+    renderButton('harvesting', lastCommentCount);
+
+    // Initial IndexedDB check
+    extractFromIndexedDB().then(res => {
+      if (res && res.success && res.count) {
+        cachedIdbCount = res.count;
+        if (isHarvesting) {
+          renderButton('harvesting', Math.max(commentMap.size, cachedIdbCount));
+        }
+      }
+    }).catch(() => {});
 
     // Run first step immediately, then interval
     stepHarvest();
@@ -1010,9 +1224,9 @@
     exportCSV();
   }
 
-  // --- 16. Expose Global Instance for Zero-Reload Hot-Swap ---
+  // --- 17. Expose Global Instance for Zero-Reload Hot-Swap ---
   window.__teamsCommentsHarvester = {
-    version: '1.2.0',
+    version: '1.3.0',
     destroy: () => {
       isHarvesting = false;
       if (harvestInterval) {
@@ -1029,10 +1243,11 @@
     exportCSV: exportCSV,
     startHarvest: startHarvest,
     stopAndExport: stopAndExport,
+    extractFromIndexedDB: extractFromIndexedDB,
     detectSessionFilename: detectSessionFilename,
     isTargetChannelView: isTargetChannelView
   };
 
   scanCurrentDOM();
-  console.log('%c🛡️ Teams Lecture Comments Harvester v1.2.0 ready (Fluent Light Draggable UI).', 'color: #5b5fc7; font-weight: bold;');
+  console.log('%c🛡️ Teams Lecture Comments Harvester v1.3.0 ready (Hybrid IndexedDB + DOM, Fluent Draggable UI).', 'color: #5b5fc7; font-weight: bold;');
 })();
