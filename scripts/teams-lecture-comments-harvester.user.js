@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Teams Lecture Comments Harvester
 // @namespace    https://github.com/uit-25730067-chithanh
-// @version      1.3.0
-// @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Hybrid IndexedDB + DOM, Exports 9-column CSV)
+// @version      1.3.1
+// @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Dynamic Progress Counter, Hybrid IndexedDB + DOM, Exports 9-column CSV)
 // @author       uit-25730067-chithanh
 // @match        https://teams.cloud.microsoft/*
 // @match        https://teams.microsoft.com/*
@@ -744,7 +744,7 @@
     }
   } catch (e) {}
 
-  function renderButton(state, count = 0) {
+  function renderButton(state, count = 0, total = 0) {
     while (btn.firstChild) {
       btn.removeChild(btn.firstChild);
     }
@@ -759,9 +759,13 @@
       btn.className = 'tlch-btn active';
       btn.appendChild(createSvgIcon('spinner', 14, '#5b5fc7'));
       const textSpan = document.createElement('span');
-      textSpan.textContent = `Đang cào (${count})...`;
+      let progressText = `${count}`;
+      if (total && total > 0) {
+        progressText = `${count}/${total}`;
+      }
+      textSpan.textContent = `Đang cào (${progressText})...`;
       btn.appendChild(textSpan);
-      btn.setAttribute('title', `Đang cào ${count} comment... Bấm để dừng và tải file CSV ngay`);
+      btn.setAttribute('title', `Đang cào ${progressText} comment... Bấm để dừng và tải file CSV ngay`);
     } else if (state === 'success') {
       btn.className = 'tlch-btn success';
       btn.appendChild(createSvgIcon('check', 14, '#107c10'));
@@ -849,6 +853,9 @@
     const shouldShow = isTargetChannelView();
     if (shouldShow && container.style.display === 'none') {
       container.style.display = 'block';
+      extractFromIndexedDB().then(res => {
+        if (res && res.success && res.count) cachedIdbCount = res.count;
+      }).catch(() => {});
     } else if (!shouldShow && container.style.display !== 'none') {
       container.style.display = 'none';
       if (isHarvesting) {
@@ -1012,7 +1019,7 @@
 
   // --- 15. CSV Exporter (Hybrid IndexedDB + DOM Fallback) ---
   async function exportCSV() {
-    renderButton('harvesting', Math.max(commentMap.size, cachedIdbCount));
+    renderButton('harvesting', commentMap.size, cachedIdbCount);
 
     let results = [];
 
@@ -1101,7 +1108,7 @@
         if (res && res.success && res.count) {
           cachedIdbCount = res.count;
           if (isHarvesting) {
-            renderButton('harvesting', Math.max(commentMap.size, cachedIdbCount));
+            renderButton('harvesting', commentMap.size, cachedIdbCount);
           }
         }
       }).catch(() => {});
@@ -1137,8 +1144,8 @@
       }
     }
 
-    const currentCount = Math.max(commentMap.size, cachedIdbCount);
-    renderButton('harvesting', currentCount);
+    const currentHarvested = commentMap.size;
+    renderButton('harvesting', currentHarvested, cachedIdbCount);
 
     // Auto-scroll upwards in channel replies viewport or messages list
     const vp = document.querySelector('[data-tid="channel-replies-viewport"]');
@@ -1160,11 +1167,11 @@
 
     // Check if new comments were loaded or scrollHeight changed
     const currentScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
-    if (currentCount === lastCommentCount && currentScrollHeight === lastScrollHeight) {
+    if (currentHarvested === lastCommentCount && currentScrollHeight === lastScrollHeight) {
       consecutiveStaleTicks++;
     } else {
       consecutiveStaleTicks = 0;
-      lastCommentCount = currentCount;
+      lastCommentCount = currentHarvested;
       lastScrollHeight = currentScrollHeight;
     }
 
@@ -1175,9 +1182,12 @@
     // Auto-stop criteria:
     // 1. Reached top and height + comment count remained unchanged for at least 12 ticks (~5.4s)
     // 2. OR postTitle is visible AND scrollTop <= 2 AND unchanged for 6 ticks (~2.7s)
-    const reachedAbsoluteTop = (isAtTop && consecutiveStaleTicks >= 12) || (hasPostTitle && isAtTop && consecutiveStaleTicks >= 6);
+    // 3. OR all expected messages harvested (cachedIdbCount > 0 && currentHarvested >= cachedIdbCount && isAtTop && consecutiveStaleTicks >= 3)
+    const reachedAbsoluteTop = (isAtTop && consecutiveStaleTicks >= 12) ||
+                               (hasPostTitle && isAtTop && consecutiveStaleTicks >= 6) ||
+                               (cachedIdbCount > 0 && currentHarvested >= cachedIdbCount && isAtTop && consecutiveStaleTicks >= 3);
 
-    if (reachedAbsoluteTop && currentCount > 0) {
+    if (reachedAbsoluteTop && currentHarvested > 0) {
       console.log('🏁 [Teams Harvester] Reached top of conversation history. Auto-exporting CSV...');
       stopAndExport();
     }
@@ -1186,17 +1196,17 @@
   function startHarvest() {
     isHarvesting = true;
     consecutiveStaleTicks = 0;
-    lastCommentCount = Math.max(commentMap.size, cachedIdbCount);
+    lastCommentCount = commentMap.size;
     lastScrollHeight = 0;
     tickCounter = 0;
-    renderButton('harvesting', lastCommentCount);
+    renderButton('harvesting', commentMap.size, cachedIdbCount);
 
     // Initial IndexedDB check
     extractFromIndexedDB().then(res => {
       if (res && res.success && res.count) {
         cachedIdbCount = res.count;
         if (isHarvesting) {
-          renderButton('harvesting', Math.max(commentMap.size, cachedIdbCount));
+          renderButton('harvesting', commentMap.size, cachedIdbCount);
         }
       }
     }).catch(() => {});
@@ -1226,7 +1236,7 @@
 
   // --- 17. Expose Global Instance for Zero-Reload Hot-Swap ---
   window.__teamsCommentsHarvester = {
-    version: '1.3.0',
+    version: '1.3.1',
     destroy: () => {
       isHarvesting = false;
       if (harvestInterval) {
@@ -1245,9 +1255,13 @@
     stopAndExport: stopAndExport,
     extractFromIndexedDB: extractFromIndexedDB,
     detectSessionFilename: detectSessionFilename,
-    isTargetChannelView: isTargetChannelView
+    isTargetChannelView: isTargetChannelView,
+    renderButton: renderButton
   };
 
   scanCurrentDOM();
-  console.log('%c🛡️ Teams Lecture Comments Harvester v1.3.0 ready (Hybrid IndexedDB + DOM, Fluent Draggable UI).', 'color: #5b5fc7; font-weight: bold;');
+  extractFromIndexedDB().then(res => {
+    if (res && res.success && res.count) cachedIdbCount = res.count;
+  }).catch(() => {});
+  console.log('%c🛡️ Teams Lecture Comments Harvester v1.3.1 ready (Dynamic Progress Counter, Fluent Draggable UI).', 'color: #5b5fc7; font-weight: bold;');
 })();

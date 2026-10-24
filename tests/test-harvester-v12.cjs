@@ -144,12 +144,36 @@ async function runTest() {
       version: window.__teamsCommentsHarvester.version,
       hasExtractIdb: typeof window.__teamsCommentsHarvester.extractFromIndexedDB === 'function',
       hasExportCSV: typeof window.__teamsCommentsHarvester.exportCSV === 'function',
-      hasStartHarvest: typeof window.__teamsCommentsHarvester.startHarvest === 'function'
+      hasStartHarvest: typeof window.__teamsCommentsHarvester.startHarvest === 'function',
+      hasRenderButton: typeof window.__teamsCommentsHarvester.renderButton === 'function'
     };
   });
   console.log('✅ [6] Exposed API checks:', apiCheck);
-  if (apiCheck.version !== '1.3.0') throw new Error(`Expected version 1.3.0, got ${apiCheck.version}`);
+  if (apiCheck.version !== '1.3.1') throw new Error(`Expected version 1.3.1, got ${apiCheck.version}`);
   if (!apiCheck.hasExtractIdb) throw new Error('extractFromIndexedDB must be exposed');
+
+  // 7. Verify dynamic progress counter formatting: (count/total)
+  const progressTextWithTotal = await page.evaluate(() => {
+    window.__teamsCommentsHarvester.renderButton('harvesting', 123, 1756);
+    const root = document.getElementById('teams-lecture-comments-harvester-root');
+    const btn = root.shadowRoot.querySelector('#tlch-trigger-btn');
+    return btn.innerText.trim();
+  });
+  console.log('✅ [7] Dynamic progress counter (with total):', progressTextWithTotal);
+  if (progressTextWithTotal !== 'Đang cào (123/1756)...') {
+    throw new Error(`Expected 'Đang cào (123/1756)...', got '${progressTextWithTotal}'`);
+  }
+
+  const progressTextWithoutTotal = await page.evaluate(() => {
+    window.__teamsCommentsHarvester.renderButton('harvesting', 45, 0);
+    const root = document.getElementById('teams-lecture-comments-harvester-root');
+    const btn = root.shadowRoot.querySelector('#tlch-trigger-btn');
+    return btn.innerText.trim();
+  });
+  console.log('✅ [7b] Dynamic progress counter (without total fallback):', progressTextWithoutTotal);
+  if (progressTextWithoutTotal !== 'Đang cào (45)...') {
+    throw new Error(`Expected 'Đang cào (45)...', got '${progressTextWithoutTotal}'`);
+  }
 
   console.log('🎉 ALL PLAYWRIGHT CHECKS PASSED PERFECTLY!');
   await browser.close();
