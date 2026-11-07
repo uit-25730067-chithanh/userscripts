@@ -145,12 +145,14 @@ async function runTest() {
       hasExtractIdb: typeof window.__teamsCommentsHarvester.extractFromIndexedDB === 'function',
       hasExportCSV: typeof window.__teamsCommentsHarvester.exportCSV === 'function',
       hasStartHarvest: typeof window.__teamsCommentsHarvester.startHarvest === 'function',
+      hasResetHarvestState: typeof window.__teamsCommentsHarvester.resetHarvestState === 'function',
       hasRenderButton: typeof window.__teamsCommentsHarvester.renderButton === 'function'
     };
   });
   console.log('✅ [6] Exposed API checks:', apiCheck);
-  if (apiCheck.version !== '1.3.2') throw new Error(`Expected version 1.3.2, got ${apiCheck.version}`);
+  if (apiCheck.version !== '1.4.0') throw new Error(`Expected version 1.4.0, got ${apiCheck.version}`);
   if (!apiCheck.hasExtractIdb) throw new Error('extractFromIndexedDB must be exposed');
+  if (!apiCheck.hasResetHarvestState) throw new Error('resetHarvestState must be exposed');
 
   // 7. Verify dynamic progress counter formatting: (count/total)
   const progressTextWithTotal = await page.evaluate(() => {
@@ -173,6 +175,29 @@ async function runTest() {
   console.log('✅ [7b] Dynamic progress counter (without total fallback):', progressTextWithoutTotal);
   if (progressTextWithoutTotal !== 'Đang cào (45)...') {
     throw new Error(`Expected 'Đang cào (45)...', got '${progressTextWithoutTotal}'`);
+  }
+
+  // 8. Test state reset
+  const resetCheck = await page.evaluate(() => {
+    window.__teamsCommentsHarvester.resetHarvestState();
+    const root = document.getElementById('teams-lecture-comments-harvester-root');
+    const btn = root.shadowRoot.querySelector('#tlch-trigger-btn');
+    return btn.innerText.trim();
+  });
+  console.log('✅ [8] resetHarvestState -> Button reset to idle:', resetCheck);
+  if (resetCheck !== 'Tải comment') {
+    throw new Error(`Expected 'Tải comment' after reset, got '${resetCheck}'`);
+  }
+
+  // 9. Test filename detection with inferredLessonSlug
+  const inferredFilename = await page.evaluate(() => {
+    return window.__teamsCommentsHarvester.detectSessionFilename({
+      inferredLessonSlug: 'buoi_02'
+    });
+  });
+  console.log('✅ [9] Inferred slug filename detection:', inferredFilename);
+  if (inferredFilename !== 'ss009_buoi_02_comments.csv') {
+    throw new Error(`Expected 'ss009_buoi_02_comments.csv', got '${inferredFilename}'`);
   }
 
   console.log('🎉 ALL PLAYWRIGHT CHECKS PASSED PERFECTLY!');

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Teams Lecture Comments Harvester
 // @namespace    https://github.com/uit-25730067-chithanh
-// @version      1.3.2
-// @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Dynamic Progress Counter, Hybrid IndexedDB + DOM, Exports 9-column CSV)
+// @version      1.4.0
+// @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Dynamic Progress Counter, Instant Hybrid IndexedDB, Exports 9-column CSV)
 // @author       uit-25730067-chithanh
 // @match        https://teams.cloud.microsoft/*
 // @match        https://teams.microsoft.com/*
@@ -56,6 +56,29 @@
   let lastScrollHeight = 0;
   let tickCounter = 0;
   let cachedIdbCount = 0;
+  let cachedIdbRecord = null;
+  let currentActiveThreadKey = null;
+
+  function resetHarvestState() {
+    isHarvesting = false;
+    if (harvestInterval) {
+      clearInterval(harvestInterval);
+      harvestInterval = null;
+    }
+    commentMap.clear();
+    networkReactionMap.clear();
+    cachedIdbCount = 0;
+    cachedIdbRecord = null;
+    consecutiveStaleTicks = 0;
+    lastCommentCount = 0;
+    lastScrollHeight = 0;
+    tickCounter = 0;
+    totalInspectedPills = 0;
+    document.querySelectorAll('[data-mid]').forEach(el => {
+      delete el.__tlchInspected;
+    });
+    renderButton('idle');
+  }
 
   // --- 1. Passive Network Interceptor (100% Read-Only) ---
   if (!window.__tlch_fetch_hooked) {
@@ -431,7 +454,7 @@
       .replace(/^_+|_+$/g, '');
   }
 
-  function detectSessionFilename() {
+  function detectSessionFilename(targetRecord = null) {
     // 1. Detect Subject Code (e.g. SS009, CS112, IT004, SE104)
     let subjectCode = '';
     const avatarImg = document.querySelector('[data-tid="channel-title-avatar"] img, [data-tid$="avatar"] img');
@@ -462,7 +485,10 @@
     let sessionTitle = '';
     const postTitleEl = document.querySelector('h3[data-tid="postTitle-text"], [data-tid="postTitle-text"]');
     if (postTitleEl && postTitleEl.innerText && postTitleEl.innerText.trim()) {
-      sessionTitle = postTitleEl.innerText.trim();
+      const rawTitle = postTitleEl.innerText.trim();
+      if (!rawTitle.match(/^(Post by|Bài đăng của|Message from)\s+/i)) {
+        sessionTitle = rawTitle;
+      }
     }
 
     if (!sessionTitle) {
@@ -471,22 +497,21 @@
       );
       if (callTitleEl && callTitleEl.innerText && callTitleEl.innerText.trim()) {
         const cand = callTitleEl.innerText.trim();
-        if (cand.length > 2 && !cand.toLowerCase().includes('microsoft teams')) {
+        if (cand.length > 2 && !cand.toLowerCase().includes('microsoft teams') && !cand.match(/^(Post by|Bài đăng của)\s+/i)) {
           sessionTitle = cand;
         }
       }
     }
 
+    const rec = targetRecord || cachedIdbRecord;
+    if (!sessionTitle && rec && rec.topic && !rec.topic.match(/^(Meeting in|Cuộc họp trong|Post by|Bài đăng của)/i)) {
+      sessionTitle = rec.topic;
+    }
+
     if (!sessionTitle && document.title) {
-      const parts = document.title.split('|').map(p => p.trim());
-      for (const p of parts) {
-        if (!p.toLowerCase().includes('teams') && !p.toLowerCase().includes('microsoft') && p.length > 2) {
-          let clean = p.replace(/^(Cuộc họp trong|Meeting in)\s*['"“]/i, '').replace(/['"”]$/, '').trim();
-          if (clean.length > 2) {
-            sessionTitle = clean;
-            break;
-          }
-        }
+      const buoiDocMatch = document.title.match(/Buổi\s*(\d+)/i) || document.title.match(/Lesson\s*(\d+)/i);
+      if (buoiDocMatch) {
+        sessionTitle = buoiDocMatch[0];
       }
     }
 
@@ -502,7 +527,22 @@
       }
     }
 
-    // 4. Combine into final filename
+    // 4. Inferred Lesson Slug from IndexedDB targetRecord (e.g. for untitled meetings like Buổi 2)
+    if (rec && rec.inferredLessonSlug) {
+      if (!lessonSlug || !sessionTitle.match(/Buổi\s*\d+/i)) {
+        lessonSlug = rec.inferredLessonSlug;
+      }
+    }
+
+    // 5. Fallback to meeting date from targetRecord if still missing
+    if (!lessonSlug && rec && rec.originalArrivalTime) {
+      const d = new Date(Number(rec.originalArrivalTime));
+      if (!isNaN(d.getTime())) {
+        lessonSlug = d.toISOString().slice(0, 10).replace(/-/g, '_');
+      }
+    }
+
+    // 6. Combine into final filename
     if (subjectCode && lessonSlug) {
       return `${subjectCode}_${lessonSlug}_comments.csv`;
     } else if (subjectCode) {
@@ -527,11 +567,7 @@
     const hasCallChat = !!document.querySelector('[data-tid="chat-pane-list"], [data-tid="chat-list"]') &&
       document.querySelectorAll('[data-tid="chat-pane-message"]').length > 0;
 
-    // 3. Fallback: message runway with at least 2 message items
-    const hasAnyMessages = document.querySelectorAll('[data-mid], [data-tid*="message-body"]').length >= 2 &&
-      !!document.querySelector('[data-tid="channel-replies-runway"], [data-tid="channel-replies-viewport"], [data-tid="message-pane-layout"]');
-
-    return hasRepliesRunway || hasRepliesMessages || hasCallChat || hasAnyMessages;
+    return hasRepliesRunway || hasRepliesMessages || hasCallChat;
   }
 
   // --- 12. Pure DOM SVG Icon Builder (100% TrustedHTML / CSP Immune) ---
@@ -779,15 +815,41 @@
   // --- SPA Visibility Watcher (Zero-Pollution on other views) ---
   let visibilityInterval = setInterval(() => {
     const shouldShow = isTargetChannelView();
-    if (shouldShow && container.style.display === 'none') {
+    let threadKey = null;
+    if (shouldShow) {
+      const rootEl = document.querySelector('[data-tid="channel-replies-pane-message"][data-mid], [data-tid="channel-replies-runway"] [data-mid]');
+      const rootMid = rootEl ? rootEl.getAttribute('data-mid') : null;
+      const postTitle = document.querySelector('[data-tid="postTitle-text"]')?.innerText?.trim() || '';
+      threadKey = rootMid || postTitle || 'active-thread';
+    }
+
+    if (shouldShow && threadKey && threadKey !== currentActiveThreadKey) {
+      currentActiveThreadKey = threadKey;
+      resetHarvestState();
       container.style.display = 'block';
       extractFromIndexedDB().then(res => {
-        if (res && res.success && res.count) cachedIdbCount = res.count;
+        if (res && res.success && res.count) {
+          cachedIdbCount = res.count;
+          cachedIdbRecord = res.targetRecord;
+        }
+      }).catch(() => {});
+    } else if (shouldShow && container.style.display === 'none') {
+      currentActiveThreadKey = threadKey;
+      resetHarvestState();
+      container.style.display = 'block';
+      extractFromIndexedDB().then(res => {
+        if (res && res.success && res.count) {
+          cachedIdbCount = res.count;
+          cachedIdbRecord = res.targetRecord;
+        }
       }).catch(() => {});
     } else if (!shouldShow && container.style.display !== 'none') {
       container.style.display = 'none';
+      currentActiveThreadKey = null;
       if (isHarvesting) {
         stopHarvestWithoutExport();
+      } else {
+        resetHarvestState();
       }
     }
   }, 500);
@@ -818,14 +880,21 @@
       if (!records || records.length === 0) return null;
 
       // Find dom mids to identify active reply chain
-      const domMids = new Set(Array.from(document.querySelectorAll('[data-mid]')).map(el => el.getAttribute('data-mid')).filter(Boolean));
+      const domMidEls = document.querySelectorAll(
+        '[data-tid="channel-replies-viewport"] [data-mid], [data-tid="channel-replies-runway"] [data-mid], [data-tid="channel-replies-pane-message"]'
+      );
+      const domMids = new Set(
+        Array.from(domMidEls.length > 0 ? domMidEls : document.querySelectorAll('[data-mid]'))
+          .map(el => el.getAttribute('data-mid'))
+          .filter(Boolean)
+      );
 
       let targetRecord = null;
       let maxOverlap = 0;
 
       for (const rec of records) {
         let overlap = 0;
-        if (domMids.has(rec.replyChainId)) overlap += 20;
+        if (domMids.has(rec.replyChainId)) overlap += 50;
         const mkeys = Object.keys(rec.messageMap || {});
         for (const k of mkeys) {
           const msg = rec.messageMap[k];
@@ -845,6 +914,17 @@
       }
 
       if (!targetRecord || !targetRecord.messageMap) return null;
+
+      // Infer meeting number for generic posts (e.g. "Post by Teacher Name")
+      if (targetRecord.conversationId) {
+        const convRecs = records.filter(r => r.conversationId === targetRecord.conversationId && Object.keys(r.messageMap || {}).length > 20);
+        convRecs.sort((a,b) => (Number(a.originalArrivalTime) || 0) - (Number(b.originalArrivalTime) || 0));
+        const idx = convRecs.findIndex(r => r.replyChainId === targetRecord.replyChainId);
+        if (idx !== -1) {
+          const num = idx + 1;
+          targetRecord.inferredLessonSlug = `buoi_${num < 10 ? '0' + num : num}`;
+        }
+      }
 
       const msgMap = targetRecord.messageMap;
       const msgKeys = Object.keys(msgMap);
@@ -871,7 +951,11 @@
         const m = msgMap[k];
         if (!m.content) continue;
         if (m.messageType === 'Control/Status' || m.messageType === 'Event/Call') continue;
+        if (m.messageType && m.messageType.includes('CallRecording')) continue;
+        if (m.properties && m.properties.s2spartnername === 'recorder') continue;
         if (m.content.includes('<callEventType>')) continue;
+        if (m.content.includes('CallRecording')) continue;
+        if (typeof m.content === 'string' && (m.content.startsWith('{"scopeId"') || m.content.startsWith('{"callId"'))) continue;
 
         const timestamp = m.originalArrivalTime || m.clientArrivalTime || m.composeTime;
         const timeStr = timestamp ? new Date(Number(timestamp)).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '';
@@ -941,7 +1025,8 @@
           });
         }
       }
-      return { success: true, count: rows.length, rows: rows };
+      cachedIdbRecord = targetRecord;
+      return { success: true, count: rows.length, rows: rows, targetRecord: targetRecord };
     } catch (err) {
       console.warn('[Teams Harvester] IndexedDB read error:', err);
       return null;
@@ -949,27 +1034,34 @@
   }
 
   // --- 15. CSV Exporter (Hybrid IndexedDB + DOM Fallback) ---
-  async function exportCSV() {
+  async function exportCSV(overrideRows = null, targetRecord = null) {
     renderButton('harvesting', commentMap.size, cachedIdbCount);
 
     let results = [];
+    let rec = targetRecord || cachedIdbRecord;
 
-    // 1. Primary: Extract from IndexedDB (preserves full reply chain + authoritative reaction details)
-    try {
-      const idbData = await extractFromIndexedDB();
-      if (idbData && idbData.success && idbData.rows && idbData.rows.length >= commentMap.size) {
-        results = idbData.rows;
-        console.log(`✅ [Teams Harvester] Primary source: Extracted ${results.length} comments from IndexedDB with full reactions.`);
+    if (overrideRows && overrideRows.length > 0) {
+      results = overrideRows;
+      console.log(`✅ [Teams Harvester] Exporting ${results.length} comments provided from IndexedDB.`);
+    } else {
+      // 1. Primary: Extract from IndexedDB (preserves full reply chain + authoritative reaction details)
+      try {
+        const idbData = await extractFromIndexedDB();
+        if (idbData && idbData.success && idbData.rows && idbData.rows.length > 0) {
+          results = idbData.rows;
+          rec = rec || idbData.targetRecord;
+          console.log(`✅ [Teams Harvester] Primary source: Extracted ${results.length} comments from IndexedDB with full reactions.`);
+        }
+      } catch (idbErr) {
+        console.warn('[Teams Harvester] IndexedDB extraction failed or unavailable, falling back to DOM:', idbErr);
       }
-    } catch (idbErr) {
-      console.warn('[Teams Harvester] IndexedDB extraction failed or unavailable, falling back to DOM:', idbErr);
-    }
 
-    // 2. Fallback: Extract from DOM commentMap
-    if (results.length === 0) {
-      scanCurrentDOM();
-      results = Array.from(commentMap.values()).sort((a, b) => (a.mid || 0) - (b.mid || 0));
-      console.log(`ℹ️ [Teams Harvester] Secondary source: Extracted ${results.length} comments from DOM.`);
+      // 2. Fallback: Extract from DOM commentMap
+      if (results.length === 0) {
+        scanCurrentDOM();
+        results = Array.from(commentMap.values()).sort((a, b) => (a.mid || 0) - (b.mid || 0));
+        console.log(`ℹ️ [Teams Harvester] Secondary source: Extracted ${results.length} comments from DOM.`);
+      }
     }
 
     if (results.length === 0) {
@@ -1006,7 +1098,7 @@
       ].join(',');
     }).join('\n');
 
-    const downloadFileName = detectSessionFilename();
+    const downloadFileName = detectSessionFilename(rec);
 
     const blob = new Blob([csvHeader + csvRows], { type: 'text/csv;charset=utf-8;' });
     const a = document.createElement('a');
@@ -1015,6 +1107,13 @@
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+
+    // Record last export details for inspection & diagnostics
+    window.__teamsCommentsHarvester.lastExport = {
+      filename: downloadFileName,
+      count: results.length,
+      timestamp: Date.now()
+    };
 
     // Show success feedback
     renderButton('success', results.length);
@@ -1104,44 +1203,48 @@
 
     // Top detection (allow margin of 25px for sub-pixel and header offsets)
     const isAtTop = scrollContainer ? scrollContainer.scrollTop <= 25 : false;
-    const hasPostTitle = !!document.querySelector('[data-tid="postTitle-text"]');
 
-    // Auto-stop criteria:
-    // 1. Reached top (scrollTop <= 25) and unchanged for 8 ticks (~3.6s)
-    // 2. OR postTitle is visible AND scrollTop <= 25 AND unchanged for 5 ticks (~2.2s)
-    // 3. OR IndexedDB has full dataset (cachedIdbCount > 0) and stale for 7 ticks (~3.1s)
-    // 4. OR absolutely stale for 12 ticks (~5.4s) anywhere (failsafe against infinite loop)
+    // Auto-stop criteria for DOM fallback:
+    // 1. Reached top (scrollTop <= 25) and unchanged for 12 ticks (~5.4s)
+    // 2. OR absolutely stale for 20 ticks (~9.0s) anywhere (failsafe against infinite loop)
     const shouldStop = 
-      (isAtTop && consecutiveStaleTicks >= 8) ||
-      (hasPostTitle && isAtTop && consecutiveStaleTicks >= 5) ||
-      (cachedIdbCount > 0 && consecutiveStaleTicks >= 7) ||
-      (consecutiveStaleTicks >= 12);
+      (isAtTop && consecutiveStaleTicks >= 12) ||
+      (consecutiveStaleTicks >= 20);
 
     if (shouldStop && (currentHarvested > 0 || cachedIdbCount > 0)) {
-      console.log(`🏁 [Teams Harvester] Completed harvesting (staleTicks=${consecutiveStaleTicks}, harvested=${currentHarvested}, idbTotal=${cachedIdbCount}). Exporting CSV...`);
+      console.log(`🏁 [Teams Harvester] Completed harvesting DOM fallback (staleTicks=${consecutiveStaleTicks}, harvested=${currentHarvested}). Exporting CSV...`);
       stopAndExport();
     }
   }
 
-  function startHarvest() {
+  async function startHarvest() {
+    // Reset state before harvest to avoid cross-thread contamination
+    resetHarvestState();
     isHarvesting = true;
     consecutiveStaleTicks = 0;
-    lastCommentCount = commentMap.size;
+    lastCommentCount = 0;
     lastScrollHeight = 0;
     tickCounter = 0;
-    renderButton('harvesting', commentMap.size, cachedIdbCount);
+    renderButton('harvesting', 0, cachedIdbCount);
 
-    // Initial IndexedDB check
-    extractFromIndexedDB().then(res => {
-      if (res && res.success && res.count) {
-        cachedIdbCount = res.count;
-        if (isHarvesting) {
-          renderButton('harvesting', commentMap.size, cachedIdbCount);
-        }
+    // 1. Instant check IndexedDB: primary high-speed extraction (< 300ms)
+    try {
+      const idbData = await extractFromIndexedDB();
+      if (idbData && idbData.success && idbData.rows && idbData.rows.length > 0) {
+        cachedIdbCount = idbData.count;
+        cachedIdbRecord = idbData.targetRecord;
+        console.log(`⚡ [Teams Harvester] Instant primary extraction from IndexedDB: ${idbData.rows.length} messages.`);
+        renderButton('harvesting', idbData.rows.length, idbData.rows.length);
+        exportCSV(idbData.rows, idbData.targetRecord);
+        isHarvesting = false;
+        return;
       }
-    }).catch(() => {});
+    } catch (err) {
+      console.warn('[Teams Harvester] Instant IndexedDB check encountered error, continuing with DOM fallback:', err);
+    }
 
-    // Run first step immediately, then interval
+    // 2. Fallback to DOM scrolling if IndexedDB has no rows or unsupported
+    console.log('ℹ️ [Teams Harvester] IndexedDB empty or unavailable. Falling back to DOM auto-scroll...');
     stepHarvest();
     harvestInterval = setInterval(stepHarvest, 450);
   }
@@ -1166,7 +1269,7 @@
 
   // --- 17. Expose Global Instance for Zero-Reload Hot-Swap ---
   window.__teamsCommentsHarvester = {
-    version: '1.3.2',
+    version: '1.4.0',
     destroy: () => {
       isHarvesting = false;
       if (harvestInterval) {
@@ -1183,15 +1286,17 @@
     exportCSV: exportCSV,
     startHarvest: startHarvest,
     stopAndExport: stopAndExport,
+    resetHarvestState: resetHarvestState,
     extractFromIndexedDB: extractFromIndexedDB,
     detectSessionFilename: detectSessionFilename,
     isTargetChannelView: isTargetChannelView,
-    renderButton: renderButton
+    renderButton: renderButton,
+    lastExport: null
   };
 
   scanCurrentDOM();
   extractFromIndexedDB().then(res => {
     if (res && res.success && res.count) cachedIdbCount = res.count;
   }).catch(() => {});
-  console.log('%c🛡️ Teams Lecture Comments Harvester v1.3.2 ready (Non-Intrusive, Dynamic Progress Counter).', 'color: #5b5fc7; font-weight: bold;');
+  console.log('%c🛡️ Teams Lecture Comments Harvester v1.4.0 ready (Non-Intrusive, Dynamic Progress Counter).', 'color: #5b5fc7; font-weight: bold;');
 })();

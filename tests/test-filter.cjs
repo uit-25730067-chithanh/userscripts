@@ -1,4 +1,4 @@
-const { chromium } = require('/Users/tcdtist/.nvm/versions/node/v22.12.0/lib/node_modules/@goonnguyen/human-cli/node_modules/playwright');
+const { chromium } = require('/Users/tcdtist/dev/aceteam/discord-aceteam/discord-bot-dashboard/node_modules/playwright');
 const fs = require('fs');
 const path = require('path');
 
