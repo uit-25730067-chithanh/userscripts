@@ -150,7 +150,7 @@ async function runTest() {
     };
   });
   console.log('✅ [6] Exposed API checks:', apiCheck);
-  if (apiCheck.version !== '1.4.0') throw new Error(`Expected version 1.4.0, got ${apiCheck.version}`);
+  if (apiCheck.version !== '1.5.0') throw new Error(`Expected version 1.5.0, got ${apiCheck.version}`);
   if (!apiCheck.hasExtractIdb) throw new Error('extractFromIndexedDB must be exposed');
   if (!apiCheck.hasResetHarvestState) throw new Error('resetHarvestState must be exposed');
 
@@ -198,6 +198,75 @@ async function runTest() {
   console.log('✅ [9] Inferred slug filename detection:', inferredFilename);
   if (inferredFilename !== 'ss009_buoi_02_comments.csv') {
     throw new Error(`Expected 'ss009_buoi_02_comments.csv', got '${inferredFilename}'`);
+  }
+
+  // 10. Test DOM fallback scroll-to-0 and spinner patience
+  await page.setContent(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Teams and Channels | SS008 | General | Microsoft Teams</title></head>
+    <body>
+      <div data-tid="message-pane-body">
+        <h3 data-tid="postTitle-text">Buổi 4</h3>
+        <div role="progressbar" id="mock-spinner">Loading earlier...</div>
+        <div data-tid="channel-replies-viewport" style="height: 200px; overflow-y: scroll;">
+          <div data-tid="channel-replies-runway" style="height: 2000px;">
+            <div data-tid="channel-replies-pane-message" class="msg">
+              <span id="author-1794483000001">Student A</span>
+              <time>7:30 PM</time>
+              <div data-mid="1794483000001" data-tid="message-body">Comment 2</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `);
+  await page.evaluate(scriptContent);
+  await page.evaluate(() => {
+    const vp = document.querySelector('[data-tid="channel-replies-viewport"]');
+    vp.scrollTop = 1200;
+    window.__teamsCommentsHarvester.startHarvest();
+  });
+  // Wait ~1.5s while spinner is active: must scroll to 0 and MUST NOT have exported yet
+  await page.waitForTimeout(1600);
+  const midHarvestState = await page.evaluate(() => ({
+    scrollTop: document.querySelector('[data-tid="channel-replies-viewport"]').scrollTop,
+    lastExport: window.__teamsCommentsHarvester.lastExport
+  }));
+  console.log('✅ [10a] Spinner active -> scrolled to top & waiting:', midHarvestState);
+  if (midHarvestState.scrollTop !== 0) throw new Error(`Expected scrollTop=0, got ${midHarvestState.scrollTop}`);
+  if (midHarvestState.lastExport !== null) throw new Error('Should NOT stop & export while spinner is visible');
+
+  // Inject earlier message (6:30 PM) and remove spinner, then verify export includes it
+  await page.evaluate(() => {
+    document.getElementById('mock-spinner').remove();
+    const runway = document.querySelector('[data-tid="channel-replies-runway"]');
+    const older = document.createElement('div');
+    older.setAttribute('data-tid', 'channel-replies-pane-message');
+    const a = document.createElement('span');
+    a.id = 'author-1794482000000';
+    a.textContent = 'Student B';
+    const t = document.createElement('time');
+    t.textContent = '6:30 PM';
+    const b = document.createElement('div');
+    b.setAttribute('data-mid', '1794482000000');
+    b.setAttribute('data-tid', 'message-body');
+    b.textContent = 'Comment 1';
+    older.append(a, t, b);
+    runway.prepend(older);
+  });
+
+  // Wait up to 14s for 24 stale ticks (~10.8s)
+  let finalExport = null;
+  for (let i = 0; i < 30; i++) {
+    finalExport = await page.evaluate(() => window.__teamsCommentsHarvester.lastExport);
+    if (finalExport) break;
+    await page.waitForTimeout(500);
+  }
+  console.log('✅ [10b] Spinner cleared -> completed DOM fallback export:', finalExport);
+  if (!finalExport || finalExport.count !== 2) {
+    throw new Error(`Expected 2 comments exported after spinner cleared, got ${JSON.stringify(finalExport)}`);
   }
 
   console.log('🎉 ALL PLAYWRIGHT CHECKS PASSED PERFECTLY!');

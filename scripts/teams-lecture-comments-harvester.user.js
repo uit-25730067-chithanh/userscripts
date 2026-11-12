@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Teams Lecture Comments Harvester
 // @namespace    https://github.com/uit-25730067-chithanh
-// @version      1.4.0
+// @version      1.5.0
 // @description  Compact, zero-click read-only comment & reaction harvester for Microsoft Teams lectures (Dynamic Progress Counter, Instant Hybrid IndexedDB, Exports 9-column CSV)
 // @author       uit-25730067-chithanh
 // @match        https://teams.cloud.microsoft/*
 // @match        https://teams.microsoft.com/*
 // @icon         https://teams.microsoft.com/favicon.ico
 // @grant        none
+// @inject-into  page
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/uit-25730067-chithanh/userscripts/main/scripts/teams-lecture-comments-harvester.user.js
+// @downloadURL  https://raw.githubusercontent.com/uit-25730067-chithanh/userscripts/main/scripts/teams-lecture-comments-harvester.user.js
 // ==/UserScript==
 
 /**
@@ -813,17 +816,26 @@
   });
 
   // --- SPA Visibility Watcher (Zero-Pollution on other views) ---
+  function getStableThreadKey() {
+    // Only read elements outside the virtualized replies runway so scrolling never mutates the key
+    const rootPost = document.querySelector('[data-tid="l2-root-message"][data-mid], [data-tid="channel-pane-message"][data-mid]');
+    if (rootPost) {
+      return rootPost.getAttribute('data-mid');
+    }
+    const postTitle = document.querySelector('[data-tid="postTitle-text"]')?.innerText?.trim() || '';
+    const postAuthor = document.querySelector('[data-tid="message-header-author"], [data-tid="post-author"]')?.innerText?.trim() || '';
+    const channelTitle = document.querySelector('[data-tid="channelTitle-text"]')?.innerText?.trim() || '';
+    if (postTitle || postAuthor) {
+      return `${channelTitle}|${postTitle}|${postAuthor}`;
+    }
+    return 'active-thread';
+  }
+
   let visibilityInterval = setInterval(() => {
     const shouldShow = isTargetChannelView();
-    let threadKey = null;
-    if (shouldShow) {
-      const rootEl = document.querySelector('[data-tid="channel-replies-pane-message"][data-mid], [data-tid="channel-replies-runway"] [data-mid]');
-      const rootMid = rootEl ? rootEl.getAttribute('data-mid') : null;
-      const postTitle = document.querySelector('[data-tid="postTitle-text"]')?.innerText?.trim() || '';
-      threadKey = rootMid || postTitle || 'active-thread';
-    }
+    const threadKey = shouldShow ? getStableThreadKey() : null;
 
-    if (shouldShow && threadKey && threadKey !== currentActiveThreadKey) {
+    if (shouldShow && !isHarvesting && threadKey && threadKey !== currentActiveThreadKey) {
       currentActiveThreadKey = threadKey;
       resetHarvestState();
       container.style.display = 'block';
@@ -835,7 +847,7 @@
       }).catch(() => {});
     } else if (shouldShow && container.style.display === 'none') {
       currentActiveThreadKey = threadKey;
-      resetHarvestState();
+      if (!isHarvesting) resetHarvestState();
       container.style.display = 'block';
       extractFromIndexedDB().then(res => {
         if (res && res.success && res.count) {
@@ -971,7 +983,7 @@
           const quoteEl = doc.querySelector('blockquote, [itemtype*="http://schema.skype.com/Reply"], [class*="quote"]');
           if (quoteEl) {
             isReply = 'Có';
-            const qAuthor = quoteEl.querySelector('b, strong, .author');
+            const qAuthor = quoteEl.querySelector('b, strong, .author, [itemprop="author"]');
             if (qAuthor) replyAuthor = (qAuthor.innerText || qAuthor.textContent || '').trim();
             const qTime = quoteEl.querySelector('time, .time');
             if (qTime) replyTime = (qTime.innerText || qTime.textContent || '').trim();
@@ -1025,8 +1037,15 @@
           });
         }
       }
+      const earliestMsg = msgMap[msgKeys[0]];
+      const earliestTs = Number(earliestMsg?.originalArrivalTime || earliestMsg?.clientArrivalTime || earliestMsg?.composeTime || 0);
+      const chainStartTs = Number(targetRecord.replyChainId || targetRecord.originalArrivalTime || 0);
+      const isComplete = (chainStartTs > 0 && earliestTs > 0)
+        ? (earliestTs - chainStartTs <= 15 * 60 * 1000)
+        : true;
+
       cachedIdbRecord = targetRecord;
-      return { success: true, count: rows.length, rows: rows, targetRecord: targetRecord };
+      return { success: true, count: rows.length, rows: rows, targetRecord: targetRecord, isComplete: isComplete };
     } catch (err) {
       console.warn('[Teams Harvester] IndexedDB read error:', err);
       return null;
@@ -1047,7 +1066,7 @@
       // 1. Primary: Extract from IndexedDB (preserves full reply chain + authoritative reaction details)
       try {
         const idbData = await extractFromIndexedDB();
-        if (idbData && idbData.success && idbData.rows && idbData.rows.length > 0) {
+        if (idbData && idbData.success && idbData.rows && idbData.rows.length > 0 && idbData.rows.length >= commentMap.size) {
           results = idbData.rows;
           rec = rec || idbData.targetRecord;
           console.log(`✅ [Teams Harvester] Primary source: Extracted ${results.length} comments from IndexedDB with full reactions.`);
@@ -1132,13 +1151,21 @@
     scanCurrentDOM();
     tickCounter++;
 
-    // Periodically update IndexedDB message count in background to show live accurate counter
+    // Periodically check IndexedDB completeness & message count while scrolling
     if (tickCounter % 4 === 0) {
       extractFromIndexedDB().then(res => {
+        if (!isHarvesting) return;
         if (res && res.success && res.count) {
           cachedIdbCount = res.count;
-          if (isHarvesting) {
-            renderButton('harvesting', commentMap.size, cachedIdbCount);
+          renderButton('harvesting', commentMap.size, cachedIdbCount);
+          if (res.isComplete && res.rows && res.rows.length >= commentMap.size) {
+            console.log(`⚡ [Teams Harvester] IndexedDB synced completely (${res.rows.length} messages). Exporting CSV...`);
+            isHarvesting = false;
+            if (harvestInterval) {
+              clearInterval(harvestInterval);
+              harvestInterval = null;
+            }
+            exportCSV(res.rows, res.targetRecord);
           }
         }
       }).catch(() => {});
@@ -1183,7 +1210,12 @@
     const scrollContainer = vp || runway || chatList;
 
     if (scrollContainer) {
-      scrollContainer.scrollBy({ top: -800, behavior: 'auto' });
+      if (scrollContainer.scrollTop <= 850) {
+        scrollContainer.scrollTop = 0;
+      } else {
+        scrollContainer.scrollBy({ top: -800, behavior: 'auto' });
+      }
+      scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
     } else {
       const items = document.querySelectorAll('[data-tid="channel-replies-pane-message"], [data-tid="chat-pane-message"], [data-mid]');
       if (items.length > 0) {
@@ -1191,25 +1223,30 @@
       }
     }
 
+    // Detect active Teams loading spinner in L2 container so we don't abort mid-fetch
+    const l2Pane = scrollContainer ? (scrollContainer.closest('[data-tid="message-pane-body"]') || scrollContainer.parentElement) : null;
+    const hasSpinner = !!(l2Pane && l2Pane.querySelector('[role="progressbar"], [data-tid*="spinner"], [data-tid*="loading"], .fui-Spinner'));
+
     // Check if new comments were loaded or scrollHeight changed
     const currentScrollHeight = scrollContainer ? scrollContainer.scrollHeight : 0;
-    if (currentHarvested === lastCommentCount && currentScrollHeight === lastScrollHeight) {
-      consecutiveStaleTicks++;
-    } else {
+    if (hasSpinner || currentHarvested !== lastCommentCount || currentScrollHeight !== lastScrollHeight) {
       consecutiveStaleTicks = 0;
       lastCommentCount = currentHarvested;
       lastScrollHeight = currentScrollHeight;
+    } else {
+      consecutiveStaleTicks++;
     }
 
     // Top detection (allow margin of 25px for sub-pixel and header offsets)
     const isAtTop = scrollContainer ? scrollContainer.scrollTop <= 25 : false;
 
     // Auto-stop criteria for DOM fallback:
-    // 1. Reached top (scrollTop <= 25) and unchanged for 12 ticks (~5.4s)
-    // 2. OR absolutely stale for 20 ticks (~9.0s) anywhere (failsafe against infinite loop)
-    const shouldStop = 
-      (isAtTop && consecutiveStaleTicks >= 12) ||
-      (consecutiveStaleTicks >= 20);
+    // 1. Reached top (scrollTop <= 25) and unchanged with no spinner for 24 ticks (~10.8s)
+    // 2. OR absolutely stale with no spinner for 36 ticks (~16.2s) anywhere (failsafe against infinite loop)
+    const shouldStop = !hasSpinner && (
+      (isAtTop && consecutiveStaleTicks >= 24) ||
+      (consecutiveStaleTicks >= 36)
+    );
 
     if (shouldStop && (currentHarvested > 0 || cachedIdbCount > 0)) {
       console.log(`🏁 [Teams Harvester] Completed harvesting DOM fallback (staleTicks=${consecutiveStaleTicks}, harvested=${currentHarvested}). Exporting CSV...`);
@@ -1227,10 +1264,10 @@
     tickCounter = 0;
     renderButton('harvesting', 0, cachedIdbCount);
 
-    // 1. Instant check IndexedDB: primary high-speed extraction (< 300ms)
+    // 1. Instant check IndexedDB: primary high-speed extraction (< 300ms) when complete
     try {
       const idbData = await extractFromIndexedDB();
-      if (idbData && idbData.success && idbData.rows && idbData.rows.length > 0) {
+      if (idbData && idbData.success && idbData.rows && idbData.rows.length > 0 && idbData.isComplete) {
         cachedIdbCount = idbData.count;
         cachedIdbRecord = idbData.targetRecord;
         console.log(`⚡ [Teams Harvester] Instant primary extraction from IndexedDB: ${idbData.rows.length} messages.`);
@@ -1239,12 +1276,15 @@
         isHarvesting = false;
         return;
       }
+      if (idbData && idbData.count) {
+        cachedIdbCount = idbData.count;
+      }
     } catch (err) {
       console.warn('[Teams Harvester] Instant IndexedDB check encountered error, continuing with DOM fallback:', err);
     }
 
-    // 2. Fallback to DOM scrolling if IndexedDB has no rows or unsupported
-    console.log('ℹ️ [Teams Harvester] IndexedDB empty or unavailable. Falling back to DOM auto-scroll...');
+    // 2. Fallback to DOM scrolling if IndexedDB is incomplete, empty, or unsupported
+    console.log('ℹ️ [Teams Harvester] IndexedDB incomplete/empty or unavailable. Running DOM + IDB auto-scroll...');
     stepHarvest();
     harvestInterval = setInterval(stepHarvest, 450);
   }
@@ -1269,7 +1309,7 @@
 
   // --- 17. Expose Global Instance for Zero-Reload Hot-Swap ---
   window.__teamsCommentsHarvester = {
-    version: '1.4.0',
+    version: '1.5.0',
     destroy: () => {
       isHarvesting = false;
       if (harvestInterval) {
@@ -1298,5 +1338,5 @@
   extractFromIndexedDB().then(res => {
     if (res && res.success && res.count) cachedIdbCount = res.count;
   }).catch(() => {});
-  console.log('%c🛡️ Teams Lecture Comments Harvester v1.4.0 ready (Non-Intrusive, Dynamic Progress Counter).', 'color: #5b5fc7; font-weight: bold;');
+  console.log('%c🛡️ Teams Lecture Comments Harvester v1.5.0 ready (Non-Intrusive, Dynamic Progress Counter).', 'color: #5b5fc7; font-weight: bold;');
 })();
